@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/qwqnt-community/types/main/plugin.schema.json",
+  "name": "qwqnt-message-to-image",
+  "version": "1.0.0",
+  "description": "右键单条文本消息，生成头像+昵称+气泡样式的图片。移植自 LiteLoaderQQNT 轻量工具箱(lite_tools)的“消息转图片”功能。",
+  "author": "移植自 xiyuesaves/lite_tools",
+  "license": "GPL-3.0",
+  "qwqnt": {
+    "name": "消息转图片",
+    "inject": {
+      "main": "./src/main.js",
+      "preload": "./src/preload.js",
+      "renderer": "./src/renderer.js"
+    },
+    "dependencies": {}
+  }
+}
