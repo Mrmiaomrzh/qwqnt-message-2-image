@@ -4,6 +4,13 @@
 (function () {
   "use strict";
 
+  // 传给 hako registerPluginSettings 的最小清单（renderer 无 import，内联即可）。
+  // 字段需与 package.json 保持一致，hako 用它在设置窗口中展示条目。
+  const pluginPackageJson = {
+    name: "qwqnt-message-to-image",
+    qwqnt: { name: "消息转图片" },
+  };
+
   const imageIcon = `<svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg"><path d="M885.76 204.8v614.4H138.24V204.8h747.52m10.24-71.68H128c-33.93024 0-61.44 27.50976-61.44 61.44v634.88c0 33.93024 27.50976 61.44 61.44 61.44h768c33.93024 0 61.44-27.50976 61.44-61.44V194.56c0-33.93024-27.50976-61.44-61.44-61.44z" fill="currentColor"></path><path d="M256.03584 718.40768a35.81952 35.81952 0 0 1-30.89408-17.6128c-9.91744-16.7424-3.83488-38.46656 12.49792-49.03936l190.45376-123.26912a40.96 40.96 0 0 1 44.08832-0.27136l101.376 63.86176a20.48 20.48 0 0 0 22.36416-0.34816l182.76864-123.20768a35.84512 35.84512 0 0 1 50.36544 10.61888c10.46528 16.59392 4.72576 38.68672-11.54048 49.65376l-209.19296 141.02016a40.94976 40.94976 0 0 1-44.72832 0.6912l-101.95456-64.22528a20.46976 20.46976 0 0 0-22.0416 0.13824l-164.11648 106.22464a35.67104 35.67104 0 0 1-19.44576 5.76512z" fill="currentColor"></path><path d="M337.92 373.76m-51.2 0a51.2 51.2 0 1 0 102.4 0 51.2 51.2 0 1 0-102.4 0Z" fill="currentColor"></path></svg>`;
 
   // ---------------------------------------------------------------------------
@@ -196,17 +203,45 @@
   // 右键菜单注入
   // ---------------------------------------------------------------------------
   let msgSticker = null;
-  let pluginConfig = { scale: 2, savePath: "" };
 
-  async function refreshConfig() {
-    if (window.messageToImage?.getConfig) {
-      try {
-        const cfg = await window.messageToImage.getConfig();
-        if (cfg) pluginConfig = cfg;
-      } catch {
-        /* 用默认值 */
+  // 配置由 qwqnt-hako 的 PluginSettings 管理（三端通用 readConfig/writeConfig）
+  const CONFIG_ID = "qwqnt-message-to-image";
+  const DEFAULT_CONFIG = { scale: 2, savePath: "" };
+  let pluginConfig = { ...DEFAULT_CONFIG };
+
+  function normalizeConfig(raw) {
+    const src = raw || {};
+    const n = Number(src.scale);
+    return {
+      scale: Number.isFinite(n) && n > 0 ? n : DEFAULT_CONFIG.scale,
+      savePath: typeof src.savePath === "string" ? src.savePath : "",
+    };
+  }
+
+  function readConfig() {
+    try {
+      if (typeof PluginSettings !== "undefined" && PluginSettings?.renderer?.readConfig) {
+        return normalizeConfig(PluginSettings.renderer.readConfig(CONFIG_ID, DEFAULT_CONFIG));
       }
+    } catch (err) {
+      logMain("读取配置失败", err?.message || String(err));
     }
+    return { ...DEFAULT_CONFIG };
+  }
+
+  function writeConfig(cfg) {
+    try {
+      if (typeof PluginSettings !== "undefined" && PluginSettings?.renderer?.writeConfig) {
+        return PluginSettings.renderer.writeConfig(CONFIG_ID, cfg);
+      }
+    } catch (err) {
+      logMain("写入配置失败", err?.message || String(err));
+    }
+    return false;
+  }
+
+  function refreshConfig() {
+    pluginConfig = readConfig();
     return pluginConfig;
   }
   refreshConfig();
@@ -286,6 +321,43 @@
     return { img: null, url: "" };
   }
 
+  // 获取发送者昵称。私聊(C2C)场景 msgRecord 常缺 sendMemberName/sendNickName，
+  // 故按「消息记录字段 → 已渲染的昵称 DOM → 头像 alt/title → 会话标题」逐级兜底。
+  function getUserName(messageEl, msgRecord) {
+    // 1) 消息记录字段：群名片 → 昵称 → 备注/其它可能字段
+    const fromRecord =
+      msgRecord?.sendMemberName ||
+      msgRecord?.sendNickName ||
+      msgRecord?.sendRemarkName ||
+      msgRecord?.anonymousExtInfo?.anonymousNick ||
+      "";
+    if (fromRecord) return fromRecord;
+
+    // 2) 从消息行 DOM 里已渲染的昵称元素取（向上扩大搜索范围，头像/昵称常在外层行容器）
+    let scope = messageEl;
+    for (let i = 0; i < 6 && scope; i++) {
+      const nameEl = scope.querySelector(
+        ".message__nickname, .user-name, .q-title, [class*='nickname'], [class*='Nickname'], [class*='userName'], [class*='UserName']"
+      );
+      const text = nameEl?.innerText?.trim();
+      if (text) return text;
+      scope = scope.parentElement;
+    }
+
+    // 3) 头像元素的 alt / title 常是昵称
+    const avatarEl = messageEl.querySelector("[class*='avatar'] img, [class*='Avatar'] img, .avatar-span img");
+    const alt = (avatarEl?.getAttribute("alt") || avatarEl?.getAttribute("title") || "").trim();
+    if (alt) return alt;
+
+    // 4) 私聊兜底：用当前会话标题（对方昵称）
+    const aioTitle = document.querySelector(".aio-nickname, .aio-content-title, .chat-header .name, [class*='aio'] [class*='title']");
+    const titleText = aioTitle?.innerText?.trim();
+    if (titleText) return titleText;
+
+    logMain("未找到昵称");
+    return "";
+  }
+
   function getAvatarImg(messageEl) {
     // 头像通常不在消息气泡内部，而在更外层的消息行容器。向上逐级扩大搜索范围。
     let scope = messageEl;
@@ -318,7 +390,7 @@
     if (elements.length === 1 && elements[0].textElement) {
       const content = elements[0].textElement.content;
       if (!content) return;
-      const userName = msgRecord?.sendMemberName || msgRecord?.sendNickName || "";
+      const userName = getUserName(messageEl, msgRecord);
       const avatar = getAvatarImg(messageEl);
       const fontFamily = getComputedStyle(messageEl).getPropertyValue("font-family");
       msgSticker = { userName, content, avatarImg: avatar.img, avatarUrl: avatar.url, fontFamily };
@@ -361,6 +433,96 @@
       appendMenuItem(qContextMenu, imageIcon, "转图片", () => createSticker(data));
     }
   }).observe(document.body, { childList: true, subtree: true });
+
+  // ---------------------------------------------------------------------------
+  // 设置界面（由 qwqnt-hako 提供的 PluginSettings 注册）
+  // ---------------------------------------------------------------------------
+  function buildSettingsUI(view) {
+    const cfg = readConfig();
+    pluginConfig = cfg;
+
+    view.innerHTML = `
+      <style>
+        .m2i-setting { padding: 16px; color: var(--text_primary, #333); font-size: 14px; }
+        .m2i-setting h2 { font-size: 16px; margin: 0 0 4px; }
+        .m2i-setting .m2i-desc { color: var(--text_secondary, #999); font-size: 12px; margin: 0 0 16px; }
+        .m2i-row { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+        .m2i-row label { flex: 0 0 96px; }
+        .m2i-row input[type="number"] { width: 96px; }
+        .m2i-row input[type="text"] { flex: 1; min-width: 0; }
+        .m2i-row input { padding: 6px 8px; border: 1px solid var(--border_primary, #ddd);
+          border-radius: 6px; background: var(--bg_bottom_standard, #fff); color: inherit; }
+        .m2i-hint { color: var(--text_secondary, #999); font-size: 12px; margin: -8px 0 16px 108px; }
+        .m2i-saved { color: var(--text_secondary, #999); font-size: 12px; margin-left: 8px; opacity: 0;
+          transition: opacity .2s; }
+        .m2i-saved.show { opacity: 1; }
+      </style>
+      <div class="m2i-setting">
+        <h2>消息转图片</h2>
+        <p class="m2i-desc">右键单条文本消息即可生成图片。修改后自动保存，下次转图片生效。</p>
+
+        <div class="m2i-row">
+          <label for="m2i-scale">渲染倍率</label>
+          <input id="m2i-scale" type="number" min="1" step="1" />
+          <span class="m2i-saved" id="m2i-scale-saved">已保存</span>
+        </div>
+        <p class="m2i-hint">图片分辨率放大倍数。1=原始，2=高清，可填 3、4 等更高值。</p>
+
+        <div class="m2i-row">
+          <label for="m2i-path">保存目录</label>
+          <input id="m2i-path" type="text" placeholder="留空则每次弹出保存对话框" />
+          <span class="m2i-saved" id="m2i-path-saved">已保存</span>
+        </div>
+        <p class="m2i-hint">填写绝对路径则直接保存到该目录，例如 G:\\images。</p>
+      </div>
+    `;
+
+    const scaleInput = view.querySelector("#m2i-scale");
+    const pathInput = view.querySelector("#m2i-path");
+    scaleInput.value = cfg.scale;
+    pathInput.value = cfg.savePath;
+
+    function flashSaved(id) {
+      const el = view.querySelector(id);
+      if (!el) return;
+      el.classList.add("show");
+      setTimeout(() => el.classList.remove("show"), 1200);
+    }
+
+    function persist() {
+      const next = normalizeConfig({ scale: scaleInput.value, savePath: pathInput.value });
+      pluginConfig = next;
+      writeConfig(next);
+      return next;
+    }
+
+    scaleInput.addEventListener("change", () => {
+      const next = persist();
+      scaleInput.value = next.scale; // 非法值回填为规范化后的值
+      flashSaved("#m2i-scale-saved");
+    });
+    pathInput.addEventListener("change", () => {
+      persist();
+      flashSaved("#m2i-path-saved");
+    });
+  }
+
+  try {
+    if (typeof RendererEvents !== "undefined" && RendererEvents?.onSettingsWindowCreated) {
+      RendererEvents.onSettingsWindowCreated(async () => {
+        try {
+          const view = await PluginSettings.renderer.registerPluginSettings(pluginPackageJson);
+          if (view) buildSettingsUI(view);
+        } catch (err) {
+          logMain("注册设置页失败", err?.message || String(err));
+        }
+      });
+    } else {
+      logMain("未检测到 qwqnt-hako (RendererEvents)，设置界面不可用");
+    }
+  } catch (err) {
+    logMain("设置界面初始化异常", err?.message || String(err));
+  }
 
   console.log("[消息转图片] renderer 已加载");
 })();

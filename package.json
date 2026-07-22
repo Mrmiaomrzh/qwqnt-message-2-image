@@ -12,6 +12,8 @@
       "preload": "./src/preload.js",
       "renderer": "./src/renderer.js"
     },
-    "dependencies": {}
+    "dependencies": {
+      "qwqnt-hako": "^1.0.1"
+    }
   }
 }
